@@ -40,15 +40,15 @@ class TkLineNumbers(Canvas):
     """
 
     def __init__(
-        self: TkLineNumbers,
-        master: Misc,
-        textwidget: Text,
-        justify: str = "left",
-        # None means take colors from text widget (default).
-        # Otherwise it is a function that takes no arguments and returns (fg, bg) tuple.
-        colors: Callable[[], tuple[str, str]] | tuple[str, str] | None = None,
-        *args,
-        **kwargs,
+            self: TkLineNumbers,
+            master: Misc,
+            textwidget: Text,
+            justify: str = "left",
+            # None means take colors from text widget (default).
+            # Otherwise it is a function that takes no arguments and returns (fg, bg) tuple.
+            colors: Callable[[], tuple[str, str]] | tuple[str, str] | None = None,
+            *args,
+            **kwargs,
     ) -> None:
         """Initializes the widget -- Internal use only"""
 
@@ -93,8 +93,7 @@ class TkLineNumbers(Canvas):
         self.bind("<Button1-Leave>", self.mouse_off_screen_scroll, add=True)
         self.bind("<Button1-Enter>", self.stop_mouse_off_screen_scroll, add=True)
 
-        # Set the yscrollcommand of the text widget to redraw the widget
-        textwidget["yscrollcommand"] = self.redraw
+        self.scroll_configure()
 
         # Redraw the widget
         self.redraw()
@@ -127,8 +126,8 @@ class TkLineNumbers(Canvas):
 
             # If the line is not visible, skip it
             dlineinfo: tuple[
-                int, int, int, int, int
-            ] | None = self.textwidget.dlineinfo(f"{lineno}.0")
+                           int, int, int, int, int
+                       ] | None = self.textwidget.dlineinfo(f"{lineno}.0")
             if dlineinfo is None or line_elided:
                 continue
 
@@ -145,6 +144,98 @@ class TkLineNumbers(Canvas):
                 font=self.textwidget.cget("font"),
                 fill=self.foreground_color,
             )
+
+    def scroll_configure(self) -> None:
+        """Sets the text widget's yscrollcommand -- Internal use only"""
+
+        # if one simply uses
+        # self.textwidget["yscrollcommand"] = self.redraw, you'll
+        # overwrite anything the package user may have set, and the
+        # user has the potential to overwrite our setting as well. The
+        # fix for this has two parts:
+        #   - update the current yscrollcommand to both execute any
+        #     user-defined command, as well as run self.redraw()
+        #   - wrap the textwidget's configure method so that any
+        #     further calls to self.textwidget.config() will also add
+        #     in the fix
+
+        # grab the current yscroll command
+        curr_comm = self.textwidget["yscrollcommand"]
+
+        # a function that calls redraw, and then the current command,
+        # if it exists
+        def scroll_with_redraw(*args, **kwargs):
+            self.redraw()
+            # if the text widget has a yscrollcommand when __init__ is
+            # called, it will already be in the form of a Tcl command
+            # (which is a string). to call it we use widget.tk.call().
+            # if the text widget doesn't have a yscrollcommand already
+            # requesting the yscrollcommand will yield None.
+            if curr_comm:
+                self.tk.call(curr_comm, *args, **kwargs)
+
+        # set the yscrollcommand of the text widget to our custom fn
+        self.textwidget["yscrollcommand"] = scroll_with_redraw
+
+        # our wrapper for self.textwidget.configure
+        def configure_wrapper(conf_fn):
+            def conf_wrapper_fn(yscrollcommand=None, *conf_args, **conf_kwargs):
+                if yscrollcommand:
+                    # if a yscrollcommand is specified, modify it, then
+                    # call config on the new args
+                    def yscroll_wrapper(*yscroll_args, **yscroll_kwargs):
+                        self.redraw()
+
+                        # passing the args through to the newly
+                        # specified yscrollcommand requires a diffrent
+                        # approach depending on how the user set it
+                        if callable(yscrollcommand):
+                            # text.configure(yscrollcommand=func)
+                            # or text.config(yscrollcommand=func)
+                            # yscrollcommand is a callable function
+                            yscrollcommand(*yscroll_args, **yscroll_kwargs)
+
+                        elif isinstance(yscrollcommand, str):
+                            # text.configure(yscrollcommand=root.register(func))
+                            # or text.config(yscrollcommand=root.register(func))
+                            # yscrollcommand is already a Tcl command
+                            # and thus a string. it must be called with
+                            # widget.tk.call()
+                            self.tk.call(yscrollcommand, *yscroll_args, **yscroll_kwargs)
+
+                        elif (isinstance(yscrollcommand, dict)
+                              and callable(yscrollcommand["yscrollcommand"])):
+                            # text['yscrollcommand'] = func
+                            # yscrollcommand is a dict with "yscrollcommand"
+                            # as a key. the value is a callable function
+                            yscrollcommand["yscrollcommand"](*yscroll_args, **yscroll_kwargs)
+
+                        elif (isinstance(yscrollcommand, dict) and
+                              isinstance(yscrollcommand["yscrollcommand"], str)):
+                            # text['yscrollcommand'] = root.register(func)
+                            # yscrollcommand is a dict with "yscrollcommand"
+                            # as a key. the value is Tcl function
+                            # (a string) and must be called with
+                            # widget.tk.call()
+                            self.tk.call(yscrollcommand["yscrollcommand"], *yscroll_args, **yscroll_kwargs)
+
+                        else:
+                            # no clue what type it is so rais an error
+                            raise TkLineNumError("Unrecognized yscrollcommand "
+                                                 "type")
+                    # modify yscrollcommand, but pass the other args
+                    # through
+                    conf_fn(yscrollcommand=yscroll_wrapper, *conf_args, *conf_kwargs)
+                else:
+                    # no yscrollcommand, so just pass the args
+                    conf_fn(*conf_args, **conf_kwargs)
+
+            return conf_wrapper_fn
+
+        # wrap both textwidget.configure() and textwidget.config() so
+        # that either works for the package user
+        self.textwidget.configure = configure_wrapper(self.textwidget.configure)
+        self.textwidget.config = configure_wrapper(self.textwidget.config)
 
     def mouse_scroll(self, event: Event) -> None:
         """Scrolls the text widget when the mouse wheel is scrolled -- Internal use only"""
@@ -243,7 +334,7 @@ class TkLineNumbers(Canvas):
 
         # Determine if the mouse is off the sides of the widget
         off_side = (
-            event.x < self.winfo_x() or event.x > self.winfo_x() + self.winfo_width()
+                event.x < self.winfo_x() or event.x > self.winfo_x() + self.winfo_width()
         )
         if not off_side:
             return
@@ -333,13 +424,14 @@ class TkLineNumbers(Canvas):
 if __name__ == "__main__":
     from tkinter import Tk
     from tkinter.ttk import Style
+    from tkinter.scrolledtext import ScrolledText
 
     root = Tk()
 
     style = Style()
     style.configure("TkLineNumbers", foreground="#2197db", background="#ffffff")
 
-    text = Text(root)
+    text = ScrolledText(root)
     text.pack(side="right")
 
     for i in range(50):
